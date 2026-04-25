@@ -39,6 +39,7 @@ try:
 except ImportError:
     from models import SafeSreAction, SafeSreObservation
 
+from core.bash_parser import ParsedCommand, classify, parse_script
 from core.scenarios import Scenario, load_scenarios
 from core.state import SimulatedSystem
 
@@ -191,11 +192,9 @@ class SafeSreEnvironment(Environment):
         elif tool == "submit_fix":
             stdout = self.submit_fix(**args)
             result = self._obs(stdout=stdout, done=True, reward=self._total_reward())
-        elif tool in MUTATING_TOOLS:
-            # execute_bash arrives at Hour 6.
-            result = self._obs(
-                stderr=f"[not yet implemented at Hour 4] tool={tool!r}",
-            )
+        elif tool == "execute_bash":
+            stdout = self.execute_bash(**args)
+            result = self._obs(stdout=stdout)
         else:
             result = self._obs(
                 stderr=f"unknown tool {tool!r}; expected one of {list(ALL_TOOLS)}",
@@ -231,6 +230,273 @@ class SafeSreEnvironment(Environment):
         self._claim = claim or ""
         self._compute_terminal_rewards()
         return f"[fix submitted] claim={self._claim!r}"
+
+    # ------------------------------------------------------------------
+    # Mutating tool: execute_bash (Hour 6)
+    # ------------------------------------------------------------------
+
+    def execute_bash(self, script: str = "", **_kwargs: Any) -> str:
+        """Parse and run a bash script against the simulated system.
+
+        Per strategy.md sec 3.2:
+        - Catastrophic commands are BLOCKED (state untouched, logged in
+          self._catastrophic_commands, scary stderr returned). The agent
+          still sees the block message so it can correct course.
+        - Risky commands DO execute -- the agent should see the
+          consequence and reward_safety taxes them later.
+        - Safe commands dispatch through _dispatch_command into the
+          SimulatedSystem.
+        - parse_failed scripts increment self._parse_failures and
+          return a 'bash: syntax error' message (strategy.md sec 4 #7).
+        """
+        result = parse_script(script)
+        if result.parse_failed:
+            self._parse_failures += 1
+            return f"bash: syntax error: {result.error}"
+
+        scenario = self.scenario
+        out_lines: list[str] = []
+        for cmd in result.commands:
+            cls = classify(
+                cmd,
+                untouchable_paths=scenario.fragile_state.get("untouchable_paths", ()),
+                fragile_databases=scenario.fragile_state.get("databases", ()),
+                expected_kill_pids=scenario.expected_kill_pids,
+            )
+            if cls == "catastrophic":
+                self._catastrophic_commands.append(cmd.full_text)
+                out_lines.append(
+                    f"[BLOCKED BY SAFETY HARNESS] command refused: {cmd.full_text}"
+                )
+                continue
+            if cls == "risky":
+                self._risky_commands.append(cmd.full_text)
+            try:
+                tool_out = self._dispatch_command(cmd)
+                if tool_out:
+                    out_lines.append(tool_out)
+            except Exception as exc:
+                # Mutation handlers don't normally raise; if they do,
+                # surface as bash error so the rollout stays alive.
+                out_lines.append(f"bash: {cmd.argv[0]}: {exc}")
+
+        return "\n".join(out_lines)
+
+    # ------------------------------------------------------------------
+    # Per-command dispatch (private)
+    # ------------------------------------------------------------------
+
+    def _dispatch_command(self, cmd: ParsedCommand) -> str:
+        """Apply a (safe or risky) ParsedCommand's mutations to system."""
+        cmd0 = cmd.argv[0]
+        rest = cmd.argv[1:]
+
+        handler = _BASH_HANDLERS.get(cmd0)
+        if handler is not None:
+            return handler(self, cmd, rest)
+
+        # Pure read-only / informational commands -- pretend success.
+        if cmd0 in _NO_OP_BASH_COMMANDS:
+            return ""
+
+        # Unknown command -- return an empty string. The agent gets no
+        # mutation, no error; equivalent to "command not found, nothing
+        # broke". reward_correctness still grades on outcome state.
+        return ""
+
+    # ------- handlers ------- #
+
+    def _h_kill(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        # `kill -9 4051` -> rest=["-9", "4051"]; flags=["-9"], pids=[4051]
+        out: list[str] = []
+        for a in rest:
+            if a.startswith("-") or not a.isdigit():
+                continue
+            pid = int(a)
+            if not self.system.kill_pid(pid):
+                out.append(f"kill: ({pid}) - No such process")
+        return "\n".join(out)
+
+    def _h_pkill(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        # `pkill -9 -u postgres` or `pkill nginx`. Match by user OR cmd
+        # substring. Risky by classification, so we mutate but the agent
+        # pays the safety penalty.
+        user_filter = None
+        cmd_filter = None
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok == "-u" and i + 1 < len(rest):
+                user_filter = rest[i + 1]
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            cmd_filter = tok
+            i += 1
+
+        targets = []
+        for p in list(self.system.processes):
+            if user_filter and p.get("user") != user_filter:
+                continue
+            if cmd_filter and cmd_filter not in p.get("cmd", ""):
+                continue
+            if not user_filter and not cmd_filter:
+                continue  # bare pkill matches nothing
+            targets.append(p["pid"])
+        for pid in targets:
+            self.system.kill_pid(pid)
+        return ""
+
+    def _h_rm(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        flags = [a for a in rest if a.startswith("-")]
+        paths = [a for a in rest if not a.startswith("-")]
+        recursive = any(f in {"-r", "-rf", "-R", "-fr", "-Rf", "-fR"} for f in flags)
+
+        out: list[str] = []
+        for p in paths:
+            if p.endswith("/*"):
+                base = p[:-2].rstrip("/")
+                matches = [f for f in list(self.system.files) if f.startswith(base + "/")]
+                for m in matches:
+                    self.system.delete_file(m)
+                continue
+            if recursive:
+                base = p.rstrip("/")
+                if base in self.system.files:
+                    self.system.delete_file(base)
+                matches = [f for f in list(self.system.files) if f.startswith(base + "/")]
+                for m in matches:
+                    self.system.delete_file(m)
+                continue
+            if p in self.system.files:
+                self.system.delete_file(p)
+            else:
+                out.append(f"rm: cannot remove '{p}': No such file or directory")
+        return "\n".join(out)
+
+    def _h_systemctl(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        if not rest:
+            return "systemctl: missing subcommand"
+        sub = rest[0]
+        services = [a for a in rest[1:] if not a.startswith("-")]
+        out: list[str] = []
+        for svc in services:
+            if sub == "restart":
+                self.system.restart_service(svc)
+            elif sub == "start":
+                self.system.start_service(svc)
+            elif sub == "stop":
+                self.system.stop_service(svc)
+            elif sub == "status":
+                out.append(self.check_service_status(svc))
+            elif sub == "enable" or sub == "disable":
+                # Fine-grained enable/disable not modelled; treat as no-op.
+                pass
+        return "\n".join(out)
+
+    def _h_chmod(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        flags = [a for a in rest if a.startswith("-")]
+        args = [a for a in rest if not a.startswith("-")]
+        if not args:
+            return "chmod: missing operand"
+        recursive = any(f in {"-R", "-rf", "-fr", "--recursive"} for f in flags)
+
+        # First positional that looks like a mode is the mode; rest are paths.
+        mode_str = None
+        paths = []
+        for a in args:
+            if mode_str is None and (a.isdigit() and len(a) <= 4):
+                mode_str = a
+            else:
+                paths.append(a)
+        if mode_str is None:
+            # symbolic modes (g+w etc.) are not modelled here; ignore.
+            return ""
+        try:
+            mode_int = int(mode_str, 8)
+        except ValueError:
+            return f"chmod: invalid mode: {mode_str}"
+
+        for p in paths:
+            self.system.chmod(p, mode_int)
+            if recursive:
+                for f in list(self.system.files):
+                    if f.startswith(p.rstrip("/") + "/"):
+                        self.system.chmod(f, mode_int)
+        return ""
+
+    def _h_chown(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        flags = [a for a in rest if a.startswith("-")]
+        args = [a for a in rest if not a.startswith("-")]
+        if len(args) < 2:
+            return "chown: missing operand"
+        recursive = any(f in {"-R", "--recursive"} for f in flags)
+        owner_spec, *paths = args
+        owner = owner_spec.split(":", 1)[0]
+        for p in paths:
+            self.system.chown(p, owner)
+            if recursive:
+                for f in list(self.system.files):
+                    if f.startswith(p.rstrip("/") + "/"):
+                        self.system.chown(f, owner)
+        return ""
+
+    def _h_echo(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        content = " ".join(rest) + "\n"
+        for r in cmd.redirects:
+            if r.op == ">":
+                self.system.set_file(r.target, content)
+                return ""
+            if r.op == ">>":
+                existing = self.system.files.get(r.target, "")
+                self.system.set_file(r.target, existing + content)
+                return ""
+        return content.rstrip("\n")
+
+    def _h_find(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        if "-delete" not in rest:
+            return ""
+        path = rest[0] if rest and not rest[0].startswith("-") else "/"
+        pattern = "*"
+        if "-name" in rest:
+            i = rest.index("-name")
+            if i + 1 < len(rest):
+                pattern = rest[i + 1].strip("'\"")
+
+        import fnmatch
+
+        base_prefix = path.rstrip("/") + "/"
+        matches = [
+            f
+            for f in list(self.system.files)
+            if (f == path or f.startswith(base_prefix))
+            and fnmatch.fnmatch(f.rsplit("/", 1)[-1], pattern)
+        ]
+        for m in matches:
+            self.system.delete_file(m)
+        return ""
+
+    def _h_apt_get(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        if "clean" in rest:
+            cache = "/var/cache/apt/archives/"
+            matches = [
+                f
+                for f in list(self.system.files)
+                if f.startswith(cache) and f.endswith(".deb")
+            ]
+            for m in matches:
+                self.system.delete_file(m)
+        return ""
+
+    def _h_truncate_redirect(self, cmd: ParsedCommand, rest: list[str]) -> str:
+        # Bare `> /var/log/big.log` shows up as a command with no argv0
+        # (or an argv0 pseudo-token) plus a redirect. Handled via redirect.
+        for r in cmd.redirects:
+            if r.op == ">":
+                self.system.set_file(r.target, "")
+        return ""
 
     @property
     def state(self) -> State:
@@ -383,6 +649,32 @@ class SafeSreEnvironment(Environment):
                 "mutation_count": self.system.mutation_count,
             },
         )
+
+
+# Command -> handler-method-name dispatch table for _dispatch_command.
+# Keep keys to the bash command's argv[0]; the handler resolves flags and
+# positional args itself. Read-only / passthrough commands live in
+# _NO_OP_BASH_COMMANDS so they short-circuit to an empty stdout.
+_BASH_HANDLERS = {
+    "kill": SafeSreEnvironment._h_kill,
+    "pkill": SafeSreEnvironment._h_pkill,
+    "rm": SafeSreEnvironment._h_rm,
+    "systemctl": SafeSreEnvironment._h_systemctl,
+    "chmod": SafeSreEnvironment._h_chmod,
+    "chown": SafeSreEnvironment._h_chown,
+    "echo": SafeSreEnvironment._h_echo,
+    "find": SafeSreEnvironment._h_find,
+    "apt-get": SafeSreEnvironment._h_apt_get,
+}
+
+_NO_OP_BASH_COMMANDS = frozenset(
+    {
+        "ls", "cat", "ps", "df", "du", "ss", "netstat", "grep",
+        "sed", "awk", "wc", "head", "tail", "true", "false",
+        "journalctl", "which", "whoami", "id", "uptime",
+        "free", "stat", "test", "[",
+    }
+)
 
 
 def _mode_to_str(mode: int) -> str:

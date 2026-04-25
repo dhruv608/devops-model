@@ -130,6 +130,12 @@ class SimulatedSystem:
         svc["restart_count"] = svc.get("restart_count", 0) + 1
         self._log("restart_service", name=name)
 
+    def stop_service(self, name: str) -> None:
+        """Bring a service to ``inactive`` (no error if it doesn't exist)."""
+        svc = self.services.setdefault(name, {})
+        svc["status"] = "inactive"
+        self._log("stop_service", name=name)
+
     def chmod(self, path: str, mode: int) -> None:
         """Update a file's mode bits (octal int, e.g. 0o600)."""
         self.file_modes[path] = mode
