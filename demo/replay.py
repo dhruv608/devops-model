@@ -115,14 +115,27 @@ def fmt_actions(actions: list[dict]) -> str:
     return " <br> ".join(parts)
 
 
-def render_markdown(rows: list[dict]) -> str:
+def render_markdown(rows: list[dict], *, is_mock: bool) -> str:
     out: list[str] = []
-    out.append("# Base vs Trained — fixed-seed replay\n")
-    out.append(
-        "Five hand-picked scenarios. Both the untrained Qwen3-1.7B base "
-        "and the GRPO-trained checkpoint roll out the same env at the same "
-        "seed. Decoding temperature is 0 so this table reproduces exactly.\n"
-    )
+    if is_mock:
+        out.append("# Pipeline verification — `--mock` (no model loaded)\n")
+        out.append(
+            "> **What this is:** the rollout pipeline + reward computation "
+            "verified end-to-end on Windows-without-GPU using deterministic "
+            "stand-in generators (`MockGenerator(style='impulsive')` for the "
+            "base, `MockGenerator(style='cautious')` for the trained side). "
+            "These numbers prove the env's reward signal is wired correctly "
+            "and that an impulsive vs cautious agent produces measurably "
+            "different scores. Real Qwen3-1.7B trained-vs-base numbers "
+            "replace this table once GRPO training completes.\n"
+        )
+    else:
+        out.append("# Base vs Trained — fixed-seed replay\n")
+        out.append(
+            "Five hand-picked scenarios. Both the untrained Qwen3-1.7B base "
+            "and the GRPO-trained checkpoint roll out the same env at the same "
+            "seed. Decoding temperature is 0 so this table reproduces exactly.\n"
+        )
     out.append(
         "| # | Scenario | Why | Base outcome | Trained outcome | Δ reward |\n"
         "|---|---|---|---|---|---|\n"
@@ -198,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
 
-    md = render_markdown(rows)
+    md = render_markdown(rows, is_mock=args.mock)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(md, encoding="utf-8")
     print(f"\nWrote {args.out}")
