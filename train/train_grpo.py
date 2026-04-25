@@ -33,6 +33,7 @@ print("=== train_grpo.py: banner top ===", flush=True)
 # so --dry_run still works on Windows-without-GPU where unsloth isn't
 # installed.
 print("=== importing unsloth (must be first) ===", flush=True)
+print("=== about to call: import unsloth ===", flush=True)
 try:
     import unsloth  # noqa: F401
 
@@ -43,10 +44,17 @@ try:
     )
 except ImportError as exc:
     print(f"=== unsloth ImportError (ok on dry_run): {exc} ===", flush=True)
-except Exception as exc:  # noqa: BLE001 -- diagnostic catch-all
+except BaseException as exc:  # noqa: BLE001 -- catches SystemExit too
+    # Without BaseException we'd miss SystemExit (unsloth + huggingface_hub
+    # call sys.exit(1) on Hub rate-limit / auth failures). The
+    # ``[Set HF_DEBUG=1]`` breadcrumb in earlier logs comes from the SDK
+    # right before such a sys.exit, with no Python traceback otherwise.
     import traceback as _tb
 
-    print(f"=== unsloth import CRASHED: {type(exc).__name__}: {exc} ===", flush=True)
+    print(
+        f"=== unsloth import CRASHED: {type(exc).__name__}: {exc} ===",
+        flush=True,
+    )
     _tb.print_exc(file=_sys.stderr)
     _sys.stderr.flush()
     raise
