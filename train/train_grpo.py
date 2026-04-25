@@ -20,16 +20,36 @@ Usage:
 
 from __future__ import annotations
 
+# Diagnostic banner so a crash during imports tells us exactly where.
+# Every print uses flush=True because stderr buffering on HF Jobs can
+# eat tracebacks if the process crashes mid-import.
+import sys as _sys
+print("=== train_grpo.py: banner top ===", flush=True)
+
 # IMPORTANT: ``import unsloth`` MUST come BEFORE trl / transformers / peft
 # so unsloth can patch them. Doing this lazily inside main() emits a
 # UserWarning that, in recent unsloth versions, escalates to a hard
 # crash during FastLanguageModel.from_pretrained. We wrap in try/except
 # so --dry_run still works on Windows-without-GPU where unsloth isn't
 # installed.
+print("=== importing unsloth (must be first) ===", flush=True)
 try:
     import unsloth  # noqa: F401
-except ImportError:
-    pass  # OK on dry_run / CPU paths
+
+    print(
+        f"=== unsloth imported, "
+        f"version={getattr(unsloth, '__version__', '?')} ===",
+        flush=True,
+    )
+except ImportError as exc:
+    print(f"=== unsloth ImportError (ok on dry_run): {exc} ===", flush=True)
+except Exception as exc:  # noqa: BLE001 -- diagnostic catch-all
+    import traceback as _tb
+
+    print(f"=== unsloth import CRASHED: {type(exc).__name__}: {exc} ===", flush=True)
+    _tb.print_exc(file=_sys.stderr)
+    _sys.stderr.flush()
+    raise
 
 import argparse
 import os
@@ -293,23 +313,32 @@ def print_dry_run_summary(args: argparse.Namespace, config_kwargs: dict, dataset
 
 
 def main(argv: list[str] | None = None) -> int:
+    print("=== main() entered ===", flush=True)
     args = parse_args(argv)
+    print(f"=== args parsed: max_steps={args.max_steps} dry_run={args.dry_run} ===", flush=True)
+
+    print("=== building dataset ===", flush=True)
     dataset = build_dataset(args)
+    print(f"=== dataset built: {len(dataset)} rows ===", flush=True)
 
     if args.dry_run:
         print_dry_run_summary(args, grpo_config_kwargs(args), dataset)
         return 0
 
+    print("=== building GRPOConfig (imports trl) ===", flush=True)
     config = build_grpo_config(args)
+    print("=== GRPOConfig built ===", flush=True)
 
-    # Heavy imports gated behind the real-training path so --dry_run
-    # works on any laptop without GPU / unsloth / vllm.
+    # unsloth was imported at module top (must come before trl); re-import
+    # the symbol here for clarity. The deferred trl import is only safe
+    # AFTER unsloth's top-of-file import has patched it.
+    print("=== importing FastLanguageModel + GRPOTrainer + SafeSreEnvironment ===", flush=True)
     from unsloth import FastLanguageModel
     from trl import GRPOTrainer
 
     from server.safe_sre_env_environment import SafeSreEnvironment
 
-    print(f"Loading {args.model_id} with Unsloth (4-bit base + LoRA)...")
+    print(f"=== loading {args.model_id} with Unsloth (4-bit base + LoRA) ===", flush=True)
     model, tokenizer = FastLanguageModel.from_pretrained(
         args.model_id,
         load_in_4bit=True,
