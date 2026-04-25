@@ -52,7 +52,15 @@ echo PHASE_3a_install_ml
 uv pip install --system --no-cache \
     transformers trl datasets wandb bashlex peft accelerate bitsandbytes
 
-echo PHASE_3b_project
+echo PHASE_3b_openenv
+# openenv-core is a runtime dep of our project; install it explicitly
+# from GitHub so we get the exact Meta OpenEnv (the PyPI 'openenv'
+# package is a NAME COLLISION with a different project -- see CLAUDE.md).
+uv pip install --system --no-cache git+https://github.com/meta-pytorch/OpenEnv
+
+echo PHASE_3b2_project
+# --no-deps to prevent re-resolving transformers/trl which would conflict
+# with the versions we pinned above.
 uv pip install --system --no-deps --no-cache -e .
 
 echo PHASE_3c_unsloth
