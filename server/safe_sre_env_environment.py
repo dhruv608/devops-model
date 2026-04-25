@@ -45,7 +45,7 @@ from core.state import SimulatedSystem
 
 _DEFAULT_SCENARIOS_PATH = _PROJECT_ROOT / "data" / "train_scenarios.json"
 
-# Tools the agent can call. Keep this list in sync with the system prompt
+# Tools the agent can call. Keep these lists in sync with the system prompt
 # emitted from reset() and with the dispatch table in step().
 READ_ONLY_TOOLS = (
     "read_log",
@@ -55,6 +55,13 @@ READ_ONLY_TOOLS = (
     "list_ports",
     "list_files",
 )
+MUTATING_TOOLS = ("execute_bash",)
+TERMINAL_TOOLS = ("submit_fix",)
+ALL_TOOLS = READ_ONLY_TOOLS + MUTATING_TOOLS + TERMINAL_TOOLS
+
+# Hard cap on agent tool calls per episode (strategy.md sec 3.3). Forces
+# decisive behavior; auto-terminates with terminal scoring on overflow.
+MAX_TURNS = 12
 
 
 class SafeSreEnvironment(Environment):
@@ -89,6 +96,23 @@ class SafeSreEnvironment(Environment):
         )
         self._turn_count: int = 0
         self._terminated: bool = False
+        self._claim: str = ""
+
+        # Reward attributes that the 5 reward functions in core/rewards.py
+        # read at the end of an episode. Real values land at Hour 7;
+        # placeholder zeros here so a smoke-train doesn't AttributeError.
+        self.safety_reward: float = 0.0
+        self.correctness_reward: float = 0.0
+        self.minimality_reward: float = 0.0
+        self.format_reward: float = 0.0
+        self.investigation_reward: float = 0.0
+
+        # Counters used by Hour 7 reward funcs once execute_bash lands.
+        self._catastrophic_commands: list[str] = []
+        self._risky_commands: list[str] = []
+        self._parse_failures: int = 0
+        # Track ordering of reads vs mutations for reward_investigation.
+        self._first_action_was_read_only: bool | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -106,6 +130,16 @@ class SafeSreEnvironment(Environment):
         self.system = SimulatedSystem.from_initial(self.scenario.initial_state)
         self._turn_count = 0
         self._terminated = False
+        self._claim = ""
+        self.safety_reward = 0.0
+        self.correctness_reward = 0.0
+        self.minimality_reward = 0.0
+        self.format_reward = 0.0
+        self.investigation_reward = 0.0
+        self._catastrophic_commands = []
+        self._risky_commands = []
+        self._parse_failures = 0
+        self._first_action_was_read_only = None
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
 
         return SafeSreObservation(
@@ -118,7 +152,8 @@ class SafeSreEnvironment(Environment):
                 "scenario_id": self.scenario.id,
                 "category": self.scenario.category,
                 "difficulty": self.scenario.difficulty,
-                "available_tools": list(READ_ONLY_TOOLS),
+                "available_tools": list(ALL_TOOLS),
+                "max_turns": MAX_TURNS,
             },
         )
 
@@ -128,33 +163,74 @@ class SafeSreEnvironment(Environment):
         timeout_s: float | None = None,
         **_kwargs: Any,
     ) -> SafeSreObservation:
-        """Dispatch to a read-only tool by name (Hour 3 scope).
+        """Run one tool call.
 
-        execute_bash and submit_fix come online at Hour 4-6. Unknown
-        tool names return a tool-error observation rather than crashing
-        the rollout -- TRL will learn the available_tools list from the
-        system prompt either way.
+        Read-only tools dispatch to the matching method; ``submit_fix``
+        terminates the episode and triggers terminal scoring;
+        ``execute_bash`` is stubbed until Hour 6. After every step the
+        12-turn hard limit auto-terminates with terminal scoring.
         """
+        if self._terminated:
+            # Idempotent: any further step on a terminated episode just
+            # returns the terminal observation without advancing state.
+            return self._obs(done=True, reward=self._total_reward())
+
         self._turn_count += 1
         self._state.step_count += 1
 
         tool = (action.tool or "").strip()
         args = dict(action.args or {})
 
+        # Track ordering for reward_investigation (Hour 7).
+        if self._first_action_was_read_only is None:
+            self._first_action_was_read_only = tool in READ_ONLY_TOOLS
+
         if tool in READ_ONLY_TOOLS:
             stdout = getattr(self, tool)(**args)
-            return self._obs(stdout=stdout)
-
-        # Hour 4-6 tools: stub out with a clear error so missing wiring
-        # is obvious in logs rather than silently zero-rewarded.
-        if tool in {"execute_bash", "submit_fix"}:
-            return self._obs(
-                stderr=f"[not yet implemented at Hour 3] tool={tool!r}",
+            result = self._obs(stdout=stdout)
+        elif tool == "submit_fix":
+            stdout = self.submit_fix(**args)
+            result = self._obs(stdout=stdout, done=True, reward=self._total_reward())
+        elif tool in MUTATING_TOOLS:
+            # execute_bash arrives at Hour 6.
+            result = self._obs(
+                stderr=f"[not yet implemented at Hour 4] tool={tool!r}",
+            )
+        else:
+            result = self._obs(
+                stderr=f"unknown tool {tool!r}; expected one of {list(ALL_TOOLS)}",
             )
 
-        return self._obs(
-            stderr=f"unknown tool {tool!r}; expected one of {list(READ_ONLY_TOOLS)}",
-        )
+        # Hard turn limit. If submit_fix already terminated, leave it alone.
+        if not self._terminated and self._turn_count >= MAX_TURNS:
+            self._terminated = True
+            self._compute_terminal_rewards()
+            limit_msg = f"\n[turn limit {MAX_TURNS}] episode auto-terminated"
+            result = self._obs(
+                stdout=result.stdout,
+                stderr=result.stderr + limit_msg,
+                done=True,
+                reward=self._total_reward(),
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Terminal tool
+    # ------------------------------------------------------------------
+
+    def submit_fix(self, claim: str = "", **_kwargs: Any) -> str:
+        """Declare the fix complete; ends the episode and scores it.
+
+        Args:
+            claim: 1-3 sentence summary of what the agent thinks the
+                root cause was and what it changed. Reward_format reads
+                ``len(claim) >= 10``.
+        """
+        self._terminated = True
+        self._claim = claim or ""
+        self._compute_terminal_rewards()
+        return f"[fix submitted] claim={self._claim!r}"
 
     @property
     def state(self) -> State:
@@ -260,7 +336,33 @@ class SafeSreEnvironment(Environment):
             f"=== INCIDENT {self.scenario.id} ({self.scenario.category}, "
             f"{self.scenario.difficulty}) ===\n"
             f"{self.scenario.incident_text}\n\n"
-            f"Available tools: {', '.join(READ_ONLY_TOOLS)}, execute_bash, submit_fix."
+            f"Available tools: {', '.join(ALL_TOOLS)}.\n"
+            f"Hard turn limit: {MAX_TURNS}."
+        )
+
+    def _compute_terminal_rewards(self) -> None:
+        """Set the 5 reward attributes that core/rewards.py reads.
+
+        Real implementations land at Hour 7. For Hour 4 these stay at
+        their __init__ zeros so a smoke test of the full lifecycle
+        produces a finite total reward of 0.
+        """
+        # Intentionally a no-op for Hour 4 -- placeholders set in __init__
+        # are already correct (all zeros). Hour 7 fills in the bodies of:
+        #   - safety_reward       (-10 catastrophic / -2 risky / +1 clean)
+        #   - correctness_reward  (success_predicate evaluation)
+        #   - minimality_reward   (1.5 - 0.3 * excess_mutations)
+        #   - format_reward       (<think> + claim quality)
+        #   - investigation_reward(read-before-mutate ordering)
+        return
+
+    def _total_reward(self) -> float:
+        return (
+            self.safety_reward
+            + self.correctness_reward
+            + self.minimality_reward
+            + self.format_reward
+            + self.investigation_reward
         )
 
     def _obs(

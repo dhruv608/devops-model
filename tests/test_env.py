@@ -10,7 +10,11 @@ silently swallowing them is detected.
 from __future__ import annotations
 
 from models import SafeSreAction
-from server.safe_sre_env_environment import READ_ONLY_TOOLS, SafeSreEnvironment
+from server.safe_sre_env_environment import (
+    ALL_TOOLS,
+    READ_ONLY_TOOLS,
+    SafeSreEnvironment,
+)
 
 
 def _new_env() -> SafeSreEnvironment:
@@ -25,9 +29,12 @@ def test_reset_loads_scenario_zero_by_default() -> None:
     assert obs.reward == 0.0
     assert obs.turn_count == 0
     assert env.scenario.id == "nginx_port_conflict_001"
-    # The available_tools list flowing into the agent must include all
-    # read-only tools -- the system prompt depends on this.
-    assert obs.metadata["available_tools"] == list(READ_ONLY_TOOLS)
+    # The available_tools list flowing into the agent must include every
+    # tool the env exposes (read-only + execute_bash + submit_fix) so the
+    # system prompt the trainer composes lists them all.
+    assert obs.metadata["available_tools"] == list(ALL_TOOLS)
+    # Sanity: the read-only set is a strict subset of all tools.
+    assert set(READ_ONLY_TOOLS).issubset(set(ALL_TOOLS))
     # Initial observation should mention the scenario id and category.
     assert "nginx_port_conflict_001" in obs.stdout
     assert "service_failure" in obs.stdout
@@ -126,14 +133,13 @@ def test_step_with_unknown_tool_returns_stderr_no_exception() -> None:
     assert obs.turn_count == 1
 
 
-def test_step_with_pending_tools_flags_not_implemented() -> None:
-    """execute_bash and submit_fix come online in Hour 4-6. Until then they
-    must return a not-implemented stderr so a missed wiring is loud."""
+def test_step_execute_bash_still_stub_until_hour_6() -> None:
+    """execute_bash arrives at Hour 6. Until then it must return a clear
+    not-implemented stderr so a missed wiring is loud."""
     env = _new_env()
     env.reset(seed=0)
-    for tool in ("execute_bash", "submit_fix"):
-        obs = env.step(SafeSreAction(tool=tool, args={}))
-        assert "not yet implemented" in obs.stderr.lower()
+    obs = env.step(SafeSreAction(tool="execute_bash", args={"script": "echo hi"}))
+    assert "not yet implemented" in obs.stderr.lower()
 
 
 def test_state_property_advances_step_count() -> None:
@@ -143,3 +149,68 @@ def test_state_property_advances_step_count() -> None:
     env.step(SafeSreAction(tool="list_ports"))
     env.step(SafeSreAction(tool="list_processes"))
     assert env.state.step_count == 2
+
+
+def test_submit_fix_terminates_episode_with_zero_placeholder_reward() -> None:
+    env = _new_env()
+    env.reset(seed=0)
+    env.step(SafeSreAction(tool="list_processes"))  # one investigation step
+    obs = env.step(SafeSreAction(tool="submit_fix", args={"claim": "killed pid 4051"}))
+
+    assert obs.done is True
+    assert env._terminated is True
+    assert env._claim == "killed pid 4051"
+    # Hour 4 placeholder: all 5 reward attrs remain 0; total = 0.
+    assert obs.reward == 0.0
+    assert env._total_reward() == 0.0
+    # All five reward attrs exist (Hour 7 will fill values; smoke train
+    # would AttributeError without these).
+    for attr in ("safety_reward", "correctness_reward",
+                 "minimality_reward", "format_reward", "investigation_reward"):
+        assert hasattr(env, attr), attr
+
+
+def test_step_after_termination_is_idempotent() -> None:
+    env = _new_env()
+    env.reset(seed=0)
+    env.step(SafeSreAction(tool="submit_fix", args={"claim": "done"}))
+    turn_before = env._turn_count
+    obs2 = env.step(SafeSreAction(tool="list_processes"))
+    # No turn advance, still terminal, reward unchanged.
+    assert env._turn_count == turn_before
+    assert obs2.done is True
+
+
+def test_first_action_was_read_only_tracks_correctly() -> None:
+    env = _new_env()
+    env.reset(seed=0)
+    env.step(SafeSreAction(tool="list_processes"))
+    assert env._first_action_was_read_only is True
+
+    env2 = _new_env()
+    env2.reset(seed=0)
+    env2.step(SafeSreAction(tool="execute_bash", args={"script": "anything"}))
+    # execute_bash is mutating (even though stubbed at Hour 4, the ordering
+    # signal is what reward_investigation uses).
+    assert env2._first_action_was_read_only is False
+
+
+def test_turn_limit_auto_terminates_at_max_turns() -> None:
+    """Twelve calls succeed; the 12th completes and flags done; further
+    calls return terminal state idempotently."""
+    from server.safe_sre_env_environment import MAX_TURNS
+
+    env = _new_env()
+    env.reset(seed=0)
+
+    # 11 read-only tool calls do not yet trigger termination.
+    for _ in range(MAX_TURNS - 1):
+        obs = env.step(SafeSreAction(tool="list_ports"))
+        assert obs.done is False
+
+    # 12th call triggers the limit branch and terminates.
+    obs = env.step(SafeSreAction(tool="list_ports"))
+    assert obs.done is True
+    assert env._terminated is True
+    assert "turn limit" in obs.stderr.lower()
+    assert env._turn_count == MAX_TURNS
