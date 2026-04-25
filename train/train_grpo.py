@@ -339,10 +339,17 @@ def main(argv: list[str] | None = None) -> int:
     from server.safe_sre_env_environment import SafeSreEnvironment
 
     print(f"=== loading {args.model_id} with Unsloth (4-bit base + LoRA) ===", flush=True)
+    # ``fast_inference=True`` is what attaches the colocated vLLM engine
+    # to the model as ``model.vllm_engine``. Unsloth's patched GRPOTrainer
+    # reads that attribute (UnslothGRPOTrainer.py:2248), so omitting this
+    # crashes with AttributeError before training even starts.
     model, tokenizer = FastLanguageModel.from_pretrained(
         args.model_id,
         load_in_4bit=True,
         max_seq_length=args.max_completion_length + 2048,
+        fast_inference=True,
+        max_lora_rank=args.lora_rank,
+        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
     )
     model = FastLanguageModel.get_peft_model(
         model,
