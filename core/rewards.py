@@ -38,29 +38,73 @@ from core.state import SimulatedSystem
 # =====================================================================
 
 
-def reward_safety(environments: Iterable[Any], **_kwargs: Any) -> list[float]:
+def _extract_environments(args: tuple, kwargs: dict) -> list[Any] | None:
+    """Find the list of env instances regardless of how trl/unsloth call us.
+
+    Across trl + unsloth-compiled-trl + openenv integration versions the
+    reward function call convention has shifted: sometimes
+    ``environments`` is the first positional, sometimes it's a kwarg
+    named ``environments`` / ``envs`` / ``env_states``, sometimes only
+    ``prompts`` and ``completions`` are passed and we must dig into a
+    state object. This helper duck-types: anything that's a list of
+    objects with ``safety_reward`` (one of our env attrs) is treated as
+    the list of environments.
+    """
+    candidates: list[Any] = []
+    candidates.extend(args)
+    for k in ("environments", "envs", "env_states", "states"):
+        if k in kwargs:
+            candidates.append(kwargs[k])
+
+    for c in candidates:
+        if isinstance(c, (list, tuple)) and c and hasattr(c[0], "safety_reward"):
+            return list(c)
+    return None
+
+
+def _batch_size(args: tuple, kwargs: dict) -> int:
+    """Last-resort: how many completions are in this batch (for zero-pad)."""
+    for k in ("completions", "prompts"):
+        v = kwargs.get(k)
+        if isinstance(v, (list, tuple)):
+            return len(v)
+    for a in args:
+        if isinstance(a, (list, tuple)):
+            return len(a)
+    return 1
+
+
+def reward_safety(*args: Any, **kwargs: Any) -> list[float]:
     """Read ``env.safety_reward``. Catastrophic -> -10, parse_failed -> -3,
-    risky -> -2 per up to -6, clean -> +1."""
-    return [float(e.safety_reward) for e in environments]
+    risky -> -2 per up to -6, clean -> +1.
+
+    Defensive signature: accepts whatever trl/unsloth pass and finds the
+    environments list via ``_extract_environments``."""
+    envs = _extract_environments(args, kwargs)
+    if envs is None:
+        return [0.0] * _batch_size(args, kwargs)
+    return [float(e.safety_reward) for e in envs]
 
 
-def reward_correctness(environments: Iterable[Any], **_kwargs: Any) -> list[float]:
+def reward_correctness(*args: Any, **kwargs: Any) -> list[float]:
     """Read ``env.correctness_reward``. Full predicate match = +5, else
     +1 per matched check, minus 5 if any fragile path was touched."""
-    return [float(e.correctness_reward) for e in environments]
+    envs = _extract_environments(args, kwargs)
+    if envs is None:
+        return [0.0] * _batch_size(args, kwargs)
+    return [float(e.correctness_reward) for e in envs]
 
 
-def reward_minimality(environments: Iterable[Any], **_kwargs: Any) -> list[float]:
+def reward_minimality(*args: Any, **kwargs: Any) -> list[float]:
     """Read ``env.minimality_reward``. 1.5 - 0.3 * excess mutations,
     floored at 0."""
-    return [float(e.minimality_reward) for e in environments]
+    envs = _extract_environments(args, kwargs)
+    if envs is None:
+        return [0.0] * _batch_size(args, kwargs)
+    return [float(e.minimality_reward) for e in envs]
 
 
-def reward_format(
-    environments: Iterable[Any],
-    completions: list[Any] | None = None,
-    **_kwargs: Any,
-) -> list[float]:
+def reward_format(*args: Any, **kwargs: Any) -> list[float]:
     """Two halves, each 0.25.
 
     - **claim**: ``env.format_reward`` already carries 0.25 iff the
@@ -69,11 +113,20 @@ def reward_format(
       text wraps reasoning in ``<think>...</think>``. The env can't see
       raw completion text, so this half is computed here.
     """
-    envs = list(environments)
-    completions = list(completions) if completions is not None else [None] * len(envs)
+    envs = _extract_environments(args, kwargs)
+    completions_kw = kwargs.get("completions")
+    if envs is None and completions_kw is None:
+        return [0.0] * _batch_size(args, kwargs)
+
+    if envs is None:
+        envs = []
+    completions = list(completions_kw) if completions_kw is not None else [None] * len(envs)
+    if len(envs) < len(completions):
+        envs = list(envs) + [None] * (len(completions) - len(envs))
+
     out: list[float] = []
     for env, comp in zip(envs, completions):
-        score = float(env.format_reward)  # claim half (already in env)
+        score = float(env.format_reward) if env is not None else 0.0
         text = _completion_text(comp)
         if "<think>" in text and "</think>" in text:
             score += 0.25
@@ -81,11 +134,14 @@ def reward_format(
     return out
 
 
-def reward_investigation(environments: Iterable[Any], **_kwargs: Any) -> list[float]:
+def reward_investigation(*args: Any, **kwargs: Any) -> list[float]:
     """Read ``env.investigation_reward``. +1 if first action was
     read-only and the agent then mutated; -0.5 if first action was a
     mutation; 0 otherwise."""
-    return [float(e.investigation_reward) for e in environments]
+    envs = _extract_environments(args, kwargs)
+    if envs is None:
+        return [0.0] * _batch_size(args, kwargs)
+    return [float(e.investigation_reward) for e in envs]
 
 
 # Convenience tuple so train_grpo.py can plug all five in at once.
