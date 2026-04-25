@@ -20,6 +20,17 @@ Usage:
 
 from __future__ import annotations
 
+# IMPORTANT: ``import unsloth`` MUST come BEFORE trl / transformers / peft
+# so unsloth can patch them. Doing this lazily inside main() emits a
+# UserWarning that, in recent unsloth versions, escalates to a hard
+# crash during FastLanguageModel.from_pretrained. We wrap in try/except
+# so --dry_run still works on Windows-without-GPU where unsloth isn't
+# installed.
+try:
+    import unsloth  # noqa: F401
+except ImportError:
+    pass  # OK on dry_run / CPU paths
+
 import argparse
 import os
 import sys
