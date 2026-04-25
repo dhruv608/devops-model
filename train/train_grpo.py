@@ -33,6 +33,29 @@ print("=== train_grpo.py: banner top ===", flush=True)
 # so --dry_run still works on Windows-without-GPU where unsloth isn't
 # installed.
 print("=== importing unsloth (must be first) ===", flush=True)
+
+# Preload torch._inductor.config so unsloth_zoo's import-time
+# `inspect.getsource(torch._inductor.config)` doesn't AttributeError.
+# In some torch builds (notably the pytorch/pytorch:* conda image),
+# `torch._inductor` is loaded but `.config` is a lazy submodule that
+# only resolves once explicitly imported. unsloth_zoo's check
+# (unsloth_zoo/temporary_patches/common.py:39) doesn't import it
+# first and crashes on the AttributeError. This explicit import
+# fixes it without any other changes.
+print("=== preloading torch._inductor.config (unsloth_zoo workaround) ===", flush=True)
+try:
+    import torch._inductor.config  # noqa: F401
+    print("=== torch._inductor.config preloaded OK ===", flush=True)
+except Exception as _preload_exc:  # noqa: BLE001
+    print(
+        f"=== torch._inductor.config preload FAILED: "
+        f"{type(_preload_exc).__name__}: {_preload_exc} ===",
+        flush=True,
+    )
+    # Don't raise -- let unsloth try anyway; if torch genuinely lacks
+    # _inductor.config the unsloth import will surface the error and our
+    # BaseException catcher below will dump the traceback.
+
 print("=== about to call: import unsloth ===", flush=True)
 try:
     import unsloth  # noqa: F401
