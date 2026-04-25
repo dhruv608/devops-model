@@ -24,80 +24,83 @@ from core.scenarios import (
 from core.state import SimulatedSystem
 
 
-TRAIN_JSON = Path(__file__).parent.parent / "data" / "train_scenarios.json"
+DATA_DIR = Path(__file__).parent.parent / "data"
+TRAIN_JSON = DATA_DIR / "train_scenarios.json"
+EVAL_JSON = DATA_DIR / "eval_scenarios.json"
 
 
-def test_load_returns_15_scenarios() -> None:
+def test_train_set_size_after_hour_10_expansion() -> None:
     scenarios = load_scenarios(TRAIN_JSON)
-    assert len(scenarios) == 15
+    assert len(scenarios) == 25
     assert all(isinstance(s, Scenario) for s in scenarios)
+    # No adv_ ids in train: those live in eval (held-out) by design.
+    assert all(not s.is_adversarial for s in scenarios)
 
 
-def test_category_distribution_matches_playbook_hour_2() -> None:
-    """Playbook Hour 2: 3 service / 3 disk / 2 process / 2 perm / 2 net / 2 db
-    plus 1 adversarial (which counts under disk_full per category but uses
-    the adv_ id prefix). Lock the breakdown so future edits notice."""
-    scenarios = load_scenarios(TRAIN_JSON)
-    counts: dict[str, int] = {}
-    for s in scenarios:
-        counts[s.category] = counts.get(s.category, 0) + 1
-
-    assert counts == {
-        "service_failure": 3,
-        "disk_full": 4,
-        "process_runaway": 2,
-        "permissions": 2,
-        "network": 2,
-        "db_recovery": 2,
-    }
-    # disk_full = 3 non-adv + 1 adv per playbook spec.
+def test_eval_set_size_and_adversarial_majority() -> None:
+    scenarios = load_scenarios(EVAL_JSON)
+    assert len(scenarios) == 8
     advs = [s for s in scenarios if s.is_adversarial]
-    assert len(advs) == 1
-    assert advs[0].category == "disk_full"
+    # Playbook Hour 10 spec: at least 6 adversarials in held-out eval.
+    assert len(advs) >= 6
+
+
+def test_train_eval_id_sets_disjoint() -> None:
+    """Hour 10 contract: train and eval must not share any scenario id.
+    A leaked scenario in training trivialises adversarial generalisation
+    measurement (strategy.md sec 4 #11)."""
+    train_ids = {s.id for s in load_scenarios(TRAIN_JSON)}
+    eval_ids = {s.id for s in load_scenarios(EVAL_JSON)}
+    assert train_ids.isdisjoint(eval_ids), train_ids & eval_ids
+
+
+def test_category_coverage_across_train_set() -> None:
+    """All 6 strategy categories must be represented in train so the
+    agent doesn't get a category-shaped blind spot."""
+    cats = {s.category for s in load_scenarios(TRAIN_JSON)}
+    assert cats == {
+        "service_failure",
+        "disk_full",
+        "process_runaway",
+        "permissions",
+        "network",
+        "db_recovery",
+    }
 
 
 def test_every_scenario_has_valid_predicate_types_and_fragile_block() -> None:
-    """Per playbook Hour 2 step 3: assert every scenario has a valid
-    initial_state, success_predicate, and fragile_state. Loader catches
-    schema bugs; this test asserts the assertions actually fired."""
-    scenarios = load_scenarios(TRAIN_JSON)
-    for s in scenarios:
-        assert s.category in VALID_CATEGORIES, s.id
-        assert s.success_predicate, s.id
-        for pred in s.success_predicate:
-            assert pred["type"] in VALID_PREDICATE_TYPES, (s.id, pred)
-        assert isinstance(s.fragile_state.get("untouchable_paths"), list), s.id
-        # Every scenario should have a non-empty incident_text >= 30 chars
-        # so the model has something to read.
-        assert len(s.incident_text) >= 30, s.id
+    """Both train AND eval must satisfy the schema. Loader catches
+    schema bugs; this asserts the assertions actually fired."""
+    for path in (TRAIN_JSON, EVAL_JSON):
+        for s in load_scenarios(path):
+            assert s.category in VALID_CATEGORIES, (path, s.id)
+            assert s.success_predicate, (path, s.id)
+            for pred in s.success_predicate:
+                assert pred["type"] in VALID_PREDICATE_TYPES, (path, s.id, pred)
+            assert isinstance(s.fragile_state.get("untouchable_paths"), list), (path, s.id)
+            assert len(s.incident_text) >= 30, (path, s.id)
 
 
 def test_every_initial_state_loads_into_simulated_system() -> None:
-    """Round-trip every scenario through SimulatedSystem.from_initial.
-    If any scenario's initial_state is malformed (port keys, file shapes,
-    etc.) this is where it surfaces -- before it costs us a training run."""
-    scenarios = load_scenarios(TRAIN_JSON)
-    for s in scenarios:
-        sys_ = SimulatedSystem.from_initial(s.initial_state)
-        # No mutations on load.
-        assert sys_.mutation_log == [], s.id
-        # Sanity: at least one of files / services / processes is non-empty
-        # for every scenario -- a totally blank initial state is a bug.
-        assert sys_.files or sys_.services or sys_.processes, s.id
+    """Round-trip every scenario (train + eval) through
+    SimulatedSystem.from_initial. Catches malformed initial_state
+    before it costs us a training run."""
+    for path in (TRAIN_JSON, EVAL_JSON):
+        for s in load_scenarios(path):
+            sys_ = SimulatedSystem.from_initial(s.initial_state)
+            assert sys_.mutation_log == [], (path, s.id)
+            # Sanity: at least one of files / services / processes is non-empty
+            # for every scenario -- a totally blank initial state is a bug.
+            assert sys_.files or sys_.services or sys_.processes, (path, s.id)
 
 
-def test_train_eval_split_routes_adversarials_to_eval() -> None:
+def test_train_eval_split_within_train_finds_no_advs() -> None:
+    """train_scenarios.json is now strictly non-adversarial; the
+    splitter run on it should produce all-train, zero-eval."""
     scenarios = load_scenarios(TRAIN_JSON)
     train, eval_ = train_eval_split(scenarios, seed=0)
-    # 14 train + 1 eval (the lone adv_).
-    assert len(train) == 14
-    assert len(eval_) == 1
-    assert all(s.id.startswith("adv_") for s in eval_)
-    assert all(not s.id.startswith("adv_") for s in train)
-    # Disjoint.
-    train_ids = {s.id for s in train}
-    eval_ids = {s.id for s in eval_}
-    assert train_ids.isdisjoint(eval_ids)
+    assert len(train) == 25
+    assert len(eval_) == 0
 
 
 def test_loader_rejects_unknown_category(tmp_path: Path) -> None:
