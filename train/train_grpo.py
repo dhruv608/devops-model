@@ -144,6 +144,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # vLLM (colocated on T4)
     p.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.12)
+    p.add_argument(
+        "--no_vllm",
+        action="store_true",
+        help=(
+            "Disable colocated vLLM. Falls back to standard transformers "
+            "generation (3-5x slower) but bypasses unsloth + vllm "
+            "import-time issues. Use this if HF Jobs runs keep silent-killing "
+            "during 'import unsloth'."
+        ),
+    )
 
     # Hub
     p.add_argument("--push_to_hub", action="store_true")
@@ -233,11 +243,19 @@ def grpo_config_kwargs(args: argparse.Namespace) -> dict:
         temperature=args.temperature,
         top_p=args.top_p,
         top_k=args.top_k,
-        # vLLM (colocated on T4)
-        use_vllm=True,
-        vllm_mode="colocate",
-        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        vllm_enable_sleep_mode=True,
+        # vLLM (colocated on T4) -- gated behind --no_vllm flag so users
+        # who keep hitting the import-time SIGKILL on this combo can fall
+        # back to standard transformers generation.
+        use_vllm=not args.no_vllm,
+        **(
+            {}
+            if args.no_vllm
+            else {
+                "vllm_mode": "colocate",
+                "vllm_gpu_memory_utilization": args.vllm_gpu_memory_utilization,
+                "vllm_enable_sleep_mode": True,
+            }
+        ),
         # Logging
         log_completions=True,
         num_completions_to_print=2,
@@ -350,15 +368,21 @@ def main(argv: list[str] | None = None) -> int:
     # ``fast_inference=True`` is what attaches the colocated vLLM engine
     # to the model as ``model.vllm_engine``. Unsloth's patched GRPOTrainer
     # reads that attribute (UnslothGRPOTrainer.py:2248), so omitting this
-    # crashes with AttributeError before training even starts.
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        args.model_id,
+    # crashes with AttributeError before training even starts -- IF
+    # use_vllm=True. Under --no_vllm we skip this and let the trainer
+    # fall back to standard generation (slower, no race conditions).
+    fp_kwargs: dict = dict(
         load_in_4bit=True,
         max_seq_length=args.max_completion_length + 2048,
-        fast_inference=True,
-        max_lora_rank=args.lora_rank,
-        gpu_memory_utilization=args.vllm_gpu_memory_utilization,
     )
+    if not args.no_vllm:
+        fp_kwargs.update(
+            fast_inference=True,
+            max_lora_rank=args.lora_rank,
+            gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        )
+    print(f"=== fp_kwargs: {sorted(fp_kwargs.keys())} (no_vllm={args.no_vllm}) ===", flush=True)
+    model, tokenizer = FastLanguageModel.from_pretrained(args.model_id, **fp_kwargs)
     model = FastLanguageModel.get_peft_model(
         model,
         r=args.lora_rank,
