@@ -85,23 +85,63 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def load_hf_generator(model_id: str, *, temperature: float, max_new_tokens: int) -> HFGenerator:
-    """Load a Hub model + tokenizer and wrap in the rollout adapter."""
+    """Load a Hub model + tokenizer and wrap in the rollout adapter.
+
+    Auto-detects whether ``model_id`` is a full model or a LoRA adapter
+    (the trained checkpoint pushed by GRPOTrainer is the latter). If it's
+    an adapter, the base model is read from adapter_config.json and the
+    adapter is layered on top via PEFT.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    print(f"  loading tokenizer {model_id}", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    # Detect LoRA adapter by probing the repo file list for adapter_config.json.
+    is_adapter = False
+    base_model_id: str = model_id
+    try:
+        from huggingface_hub import HfApi
+
+        files = HfApi().list_repo_files(model_id)
+        if any(f.endswith("adapter_config.json") for f in files):
+            is_adapter = True
+            from peft import PeftConfig
+
+            cfg = PeftConfig.from_pretrained(model_id)
+            base_model_id = cfg.base_model_name_or_path or model_id
+            print(
+                f"  detected LoRA adapter; base model = {base_model_id}",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  adapter probe failed (assuming full model): {exc}", flush=True)
+
+    print(f"  loading tokenizer {base_model_id}", flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    print(f"  loading model    {model_id}", flush=True)
+    print(f"  loading model    {base_model_id}", flush=True)
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+        base_model_id,
         torch_dtype=dtype,
         device_map="auto" if torch.cuda.is_available() else None,
         trust_remote_code=True,
     )
+
+    if is_adapter:
+        from peft import PeftModel
+
+        print(f"  applying LoRA adapter from {model_id}", flush=True)
+        model = PeftModel.from_pretrained(model, model_id)
+        # Merge the adapter into the base for faster generation; the
+        # adapter is small so this doesn't blow memory.
+        try:
+            model = model.merge_and_unload()
+            print("  adapter merged into base", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  merge_and_unload failed (continuing un-merged): {exc}", flush=True)
+
     model.eval()
 
     return HFGenerator(
