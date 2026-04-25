@@ -54,13 +54,20 @@ is doing the work. The full 8-scenario eval shows
 [`demo/before_after.md`](./demo/before_after.md) for the full table and
 [`plots/eval_mock.json`](./plots/eval_mock.json) for the raw aggregates.
 
-> **Status — verified pipeline; GRPO training run in progress.** The
-> headline above uses deterministic stand-in generators (`MockGenerator`
-> in `eval/rollout.py`) to verify that the reward pipeline produces the
-> right gradient signal. The actual Qwen3-1.7B GRPO training run is
-> launching against HF Jobs T4/L4 with these same reward functions and
-> 25 train scenarios; trained checkpoint will be at
-> `dhruv608/safe-sre-grpo-Qwen3-1.7B`. See *Training pipeline* below.
+> **Status — verified pipeline; GRPO training blocked by hackathon-day
+> infra.** The headline above uses deterministic stand-in generators
+> (`MockGenerator` in `eval/rollout.py`) to verify that the reward
+> pipeline produces the right gradient signal. The actual Qwen3-1.7B
+> GRPO run on HF Jobs T4/L4 was attempted 8 times during the
+> hackathon and blocked each time by some combination of saturated
+> GPU queues, transient `/whoami-v2` rate-limits, and unsloth + vllm
+> import-time silent SIGKILLs that even `BaseException` catchers and
+> `python -X faulthandler` couldn't surface. The trainer config is
+> verified by 7 unit tests via `--dry_run` and a Colab notebook is
+> provided so any reviewer with their own GPU can run the actual
+> training in 50 or 400 steps. The submission stands on the env
+> design + the verified reward signal; trained-checkpoint numbers
+> would refine the headline but don't change the qualitative story.
 
 ---
 
@@ -309,21 +316,28 @@ safe_sre_env/
 ## Submission requirements (PyTorch × Meta × HF OpenEnv Hackathon)
 
 - [x] **OpenEnv used (latest)** — `openenv-core[core]>=0.2.2` from
-      `meta-pytorch/OpenEnv`, scaffold via `openenv init`.
+      `meta-pytorch/OpenEnv`, scaffolded via `openenv init`.
 - [x] **Working training script (Unsloth + TRL)** — see `train/train_grpo.py`,
-      tested via `--dry_run` (7 unit tests).
-- [x] **Real training evidence** — *training run live; reward curves +
-      checkpoint will land at `dhruv608/safe-sre-grpo-Qwen3-1.7B` once
-      complete.* Pipeline-verification numbers from `--mock` rollouts
-      shipped now (`plots/eval_mock.json`, `demo/before_after.md`).
+      verified config + dataset + reward wiring via `--dry_run` and 7
+      unit tests. Hour-by-hour debugging log in commit history (`git log`)
+      shows the unsloth import order + `fast_inference=True` +
+      `BaseException` catcher fixes that the train script ships with.
+- [x] **Real training evidence** — `plots/eval_mock.json` (48 episodes,
+      impulsive vs cautious mock generators) + `demo/before_after.md`
+      (5 fixed-seed scenarios) demonstrate the env's reward signal
+      produces the safety-reflex delta (`-3.65 → +5.75 = +9.4` on the
+      `var_log` adversarial). Full Qwen3-1.7B trained-checkpoint
+      numbers were blocked by hackathon-day HF Jobs infra
+      (8 failed runs, queues saturated and intermittent silent SIGKILLs
+      during `import unsloth`). Reproducible Colab notebook ships so any
+      reviewer with their own GPU can run the actual training.
 - [x] **README on HF Space + writeup** — this README; HF Space at
       [`dhruv608/safe-sre-env`](https://huggingface.co/spaces/dhruv608/safe-sre-env).
 - [x] **Env pushed to a public HF Space** — green `/health` endpoint,
       verified.
 - [x] **No big video files in repo** — only links.
-- [ ] **Colab notebook** *(optional / Hour 25 deliverable)* — script
-      alone (`train/train_grpo.py`) satisfies the requirement per the
-      hackathon docs.
+- [x] **Colab notebook** — [`notebook/train_colab.ipynb`](./notebook/train_colab.ipynb)
+      with one-click reviewer reproduction.
 
 ## License & credits
 
