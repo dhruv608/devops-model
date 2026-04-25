@@ -268,23 +268,26 @@ def test_state_property_advances_step_count() -> None:
     assert env.state.step_count == 2
 
 
-def test_submit_fix_terminates_episode_with_zero_placeholder_reward() -> None:
+def test_submit_fix_terminates_episode_and_populates_reward_attrs() -> None:
+    """After Hour 7, submit_fix triggers _compute_terminal_rewards which
+    populates all 5 attrs. This test asserts the contract (attrs exist
+    and the obs reward equals the sum); the per-component values are
+    pinned in tests/test_rewards.py."""
     env = _new_env()
     env.reset(seed=0)
-    env.step(SafeSreAction(tool="list_processes"))  # one investigation step
+    env.step(SafeSreAction(tool="list_processes"))  # investigate first
     obs = env.step(SafeSreAction(tool="submit_fix", args={"claim": "killed pid 4051"}))
 
     assert obs.done is True
     assert env._terminated is True
     assert env._claim == "killed pid 4051"
-    # Hour 4 placeholder: all 5 reward attrs remain 0; total = 0.
-    assert obs.reward == 0.0
-    assert env._total_reward() == 0.0
-    # All five reward attrs exist (Hour 7 will fill values; smoke train
-    # would AttributeError without these).
+    # All five reward attrs exist and are floats.
     for attr in ("safety_reward", "correctness_reward",
                  "minimality_reward", "format_reward", "investigation_reward"):
         assert hasattr(env, attr), attr
+        assert isinstance(getattr(env, attr), float), attr
+    # Observation reward equals the sum of components.
+    assert abs(obs.reward - env._total_reward()) < 1e-9
 
 
 def test_step_after_termination_is_idempotent() -> None:
