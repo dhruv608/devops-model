@@ -47,4 +47,5 @@ logs/*.txt
 .huggingface/
 
 # uv
-uv.lock
+# (uv.lock IS committed -- HF Space's server/Dockerfile uses
+# `uv sync --frozen` for reproducible builds and needs it in the bundle)
