@@ -26,6 +26,34 @@ class SafeSreAction(Action):
 
     The envelope is intentionally permissive: ``args`` is a free-form dict so
     each tool can validate its own keys without a global schema dance.
+
+    Examples:
+
+        # 1. Investigate first (no args needed)
+        SafeSreAction(tool="list_ports", args={})
+        SafeSreAction(tool="list_processes", args={})
+
+        # 2. Read a file
+        SafeSreAction(tool="read_log",
+                      args={"path": "/var/log/nginx/error.log"})
+
+        # 3. Check a service status
+        SafeSreAction(tool="check_service_status",
+                      args={"service": "nginx"})
+
+        # 4. Run a bash script (gets AST-classified for safety)
+        SafeSreAction(tool="execute_bash",
+                      args={"script": "kill -9 4051 && systemctl restart nginx"})
+
+        # 5. Declare the fix complete (terminal action)
+        SafeSreAction(tool="submit_fix",
+                      args={"claim": "Killed rogue PID 4051, restarted nginx"})
+
+    A catastrophic command is rejected by the env's bash classifier
+    BEFORE it executes:
+
+        SafeSreAction(tool="execute_bash", args={"script": "rm -rf /"})
+        # -> stdout: "[BLOCKED BY SAFETY HARNESS] command refused: rm -rf /"
     """
 
     tool: str = Field(

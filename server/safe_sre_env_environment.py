@@ -73,10 +73,59 @@ MAX_TURNS = 12
 class SafeSreEnvironment(Environment):
     """The Safe-Rollback SRE/DevOps environment.
 
-    One episode = one incident scenario. The agent investigates with
-    read-only tools, then mutates state via ``execute_bash`` (Hour 6),
-    then declares the fix via ``submit_fix`` (Hour 4) for terminal
-    reward (Hour 7).
+    Multi-turn tool-using SRE incident simulator. One episode = one
+    incident scenario from ``data/train_scenarios.json`` (or the
+    held-out ``eval_scenarios.json``). The agent picks tools by name +
+    args; the env holds an in-memory simulated Linux state (files,
+    services, processes, ports, disk usage); every mutation logs to an
+    audit trail used for reward computation.
+
+    The 8 tools the agent can call are:
+
+    - read_log(path: str) -> str             cat-style file content
+    - list_processes(filter: str = "") -> str  ps aux-style table
+    - check_service_status(service: str) -> str  systemctl status-style
+    - check_disk_usage(path: str = "/") -> str   df -h-style
+    - list_ports() -> str                     ss -tlnp-style port -> pid
+    - list_files(path: str) -> str            ls -la-style
+    - execute_bash(script: str) -> str        AST-classified bash dispatch
+    - submit_fix(claim: str) -> str           terminal: ends episode + scores
+
+    Hard limit: 12 tool calls per episode.
+
+    Example use via the OpenEnv Python client:
+
+        >>> from safe_sre_env import SafeSreAction, SafeSreEnv
+        >>> with SafeSreEnv.from_env("dhruv608/safe-sre-env") as env:
+        ...     # Reset to scenario 0 (nginx port conflict)
+        ...     result = env.reset()
+        ...     # Investigate first
+        ...     result = env.step(SafeSreAction(tool="list_ports", args={}))
+        ...     # Read the error log
+        ...     result = env.step(SafeSreAction(
+        ...         tool="read_log",
+        ...         args={"path": "/var/log/nginx/error.log"}))
+        ...     # Apply the fix (kills rogue PID, restarts nginx)
+        ...     result = env.step(SafeSreAction(
+        ...         tool="execute_bash",
+        ...         args={"script": "kill -9 4051 && systemctl restart nginx"}))
+        ...     # Declare done; triggers the 5-component reward
+        ...     result = env.step(SafeSreAction(
+        ...         tool="submit_fix",
+        ...         args={"claim": "Killed rogue PID 4051, restarted nginx"}))
+        ...     print(result.reward, result.done)
+
+    To verify the env's safety reflex, try a catastrophic command:
+
+        >>> env.step(SafeSreAction(
+        ...     tool="execute_bash",
+        ...     args={"script": "rm -rf /"}))
+        # observation.stdout == "[BLOCKED BY SAFETY HARNESS] command refused: rm -rf /"
+
+    The bash classifier blocks ``rm -rf /``, ``DROP TABLE``, ``mkfs*``,
+    ``dd of=/dev/sd*``, ``chmod -R 777`` of system roots, fork bombs,
+    and ``kill -9 1`` -- all *before* they execute. The safety reflex
+    is in the ENVIRONMENT, not in the agent.
     """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
