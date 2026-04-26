@@ -28,6 +28,17 @@ Usage:
     python -m server.app
 """
 
+import os
+
+# Disable OpenEnv's built-in /web Gradio playground BEFORE importing.
+# OpenEnv 0.2.2 calls gr.mount_gradio_app(theme=...) which only exists in
+# Gradio 6.x, but we pin Gradio 5.x because 6.x renders blank when mounted
+# at a sub-path like /dashboard. Setting this env var here (rather than
+# relying on the Dockerfile ENV directive) is bulletproof against HF
+# Spaces' container-level overrides. We mount our own Gradio dashboard at
+# /dashboard manually below.
+os.environ["ENABLE_WEB_INTERFACE"] = "false"
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
