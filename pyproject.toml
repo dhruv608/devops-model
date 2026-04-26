@@ -15,12 +15,14 @@ description = "Safe Sre Env environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
-    # install from github
-    # "openenv-core[core] @ git+https://github.com/meta-pytorch/OpenEnv.git",
     "openenv-core[core]>=0.2.2",
     # Bash parser used by core/bash_parser.py to AST-walk the agent's
     # execute_bash payloads and classify safe / risky / catastrophic commands.
     "bashlex>=0.18",
+    # Pin Gradio to 5.x — Gradio 6 renders blank when mounted at a sub-path
+    # like /dashboard. 5.x renders correctly. Confirmed against the
+    # safe-sre-comparison Space which uses gradio==5.9.1.
+    "gradio>=5.9,<6",
 ]
 
 [project.optional-dependencies]
