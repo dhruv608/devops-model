@@ -84,13 +84,20 @@ def _format_example(example: dict) -> tuple[str, str, str, str]:
 
 
 def build_safe_sre_ui(
-    web_manager: Any,
-    action_fields: Any,
-    metadata: Any,
-    is_chat_env: bool,
-    title: str,
-    quick_start_md: str,
+    web_manager: Any = None,
+    action_fields: Any = None,
+    metadata: Any = None,
+    is_chat_env: bool = False,
+    title: str = "Safe-SRE",
+    quick_start_md: str = "",
 ) -> gr.Blocks:
+    """Build the flat single-page dashboard.
+
+    All args are optional so the function can be called both as an OpenEnv
+    ``gradio_builder`` and directly (with no args) when we mount it at
+    ``/dashboard`` ourselves to bypass OpenEnv's outer Playground/Custom
+    tab wrapper.
+    """
     examples = _load_examples()
     choices = [f"{i+1}. {ex['label']}" for i, ex in enumerate(examples)]
     by_choice = {c: ex for c, ex in zip(choices, examples)}

@@ -44,24 +44,30 @@ except ImportError:
     from server.dashboard_ui import build_safe_sre_ui
     from server.safe_sre_env_environment import SafeSreEnvironment
 
+import gradio as gr
 
-# Create the app with web interface and README integration.
-#
-# ``gradio_builder=build_safe_sre_ui`` adds a "Custom" tab to /web alongside
-# the default OpenEnv "Playground" tab — turning the App view into a
-# single-page judge experience: project context + pre-computed comparisons
-# + outbound link to the live comparison Space + architecture drill-down,
-# while keeping the Playground tab so reviewers can still hit the env's
-# tool form directly. Falls back gracefully to the bare playground if the
-# custom builder ever raises (OpenEnv's TypeError check).
+
+# Create the app with the OpenEnv FastAPI server (mounts the bare playground
+# at /web for backward compatibility — judges/agents who hit /web directly
+# still see the standard tool form).
 app = create_app(
     SafeSreEnvironment,
     SafeSreAction,
     SafeSreObservation,
     env_name="safe_sre_env",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
-    gradio_builder=build_safe_sre_ui,
 )
+
+
+# Mount our flat single-page dashboard at /dashboard.
+#
+# This is what the HF Space's App tab loads (see ``base_path: /dashboard``
+# in README front-matter). Bypasses OpenEnv's outer Playground/Custom
+# TabbedInterface wrapper — judges land directly on a flat page with
+# project description + scenario dropdown + Run Comparison button +
+# side-by-side outputs. The OpenEnv playground at /web stays accessible
+# for anyone who explicitly visits it.
+app = gr.mount_gradio_app(app, build_safe_sre_ui(), path="/dashboard")
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):

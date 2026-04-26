@@ -6,7 +6,7 @@ colorTo: green
 sdk: docker
 pinned: true
 app_port: 8000
-base_path: /web
+base_path: /dashboard
 tags:
   - openenv
   - reinforcement-learning
