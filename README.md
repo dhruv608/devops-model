@@ -84,7 +84,11 @@ Trained checkpoint: [`huggingface.co/dhruv608/safe-sre-grpo-Qwen3-1.7B`](https:/
 
 ## Try it yourself in 30 seconds
 
-The env is live as an HF Space. **Open the playground:**
+> **🆚 Want a side-by-side base-vs-trained demo with no code?**
+> Open the companion **[Gradio comparison Space](https://huggingface.co/spaces/dhruv608/safe-sre-comparison)**
+> — pick a scenario from the dropdown, click Run, see both models' tool calls.
+
+The env itself is live as an HF Space. **Open the playground:**
 
 **[`https://dhruv608-safe-sre-env.hf.space/web`](https://dhruv608-safe-sre-env.hf.space/web)**
 
