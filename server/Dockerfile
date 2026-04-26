@@ -71,6 +71,14 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Set PYTHONPATH so imports work correctly
 ENV PYTHONPATH="/app/env:$PYTHONPATH"
 
+# Disable OpenEnv's auto-mounted /web playground.
+# OpenEnv 0.2.2's create_web_interface_app() calls
+# gr.mount_gradio_app(theme=...) which only exists in Gradio 6.x — and
+# Gradio 6.x renders blank at sub-paths like /dashboard. So we pin
+# Gradio 5.x (works at sub-paths) and skip OpenEnv's playground mount;
+# our own custom Gradio dashboard at /dashboard is the App-tab UI.
+ENV ENABLE_WEB_INTERFACE=false
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
