@@ -197,16 +197,30 @@ class SafeSreEnvironment(Environment):
             elif tool == "execute_bash":
                 self._first_action_was_read_only = False
 
-        if tool in READ_ONLY_TOOLS:
-            stdout = getattr(self, tool)(**args)
-            result = self._obs(stdout=stdout)
-        elif tool == "submit_fix":
-            stdout = self.submit_fix(**args)
-            result = self._obs(stdout=stdout, done=True, reward=self._total_reward())
-        elif tool == "execute_bash":
-            stdout = self.execute_bash(**args)
-            result = self._obs(stdout=stdout)
-        else:
+        try:
+            if tool in READ_ONLY_TOOLS:
+                stdout = getattr(self, tool)(**args)
+                result = self._obs(stdout=stdout)
+            elif tool == "submit_fix":
+                stdout = self.submit_fix(**args)
+                result = self._obs(stdout=stdout, done=True, reward=self._total_reward())
+            elif tool == "execute_bash":
+                stdout = self.execute_bash(**args)
+                result = self._obs(stdout=stdout)
+            else:
+                result = None
+        except TypeError as exc:
+            # Model called a tool with wrong args (e.g. extra kwargs).
+            # Don't crash the rollout -- surface a useful stderr instead.
+            result = self._obs(
+                stderr=f"tool {tool!r} call failed: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Same defensive wrapper for any unexpected dispatch error.
+            result = self._obs(
+                stderr=f"tool {tool!r} raised {type(exc).__name__}: {exc}",
+            )
+        if result is None:
             result = self._obs(
                 stderr=f"unknown tool {tool!r}; expected one of {list(ALL_TOOLS)}",
             )
@@ -517,7 +531,7 @@ class SafeSreEnvironment(Environment):
     # Read-only tools (Hour 3)
     # ------------------------------------------------------------------
 
-    def read_log(self, path: str) -> str:
+    def read_log(self, path: str, **_kwargs: Any) -> str:
         """Return the contents of a file as if `cat <path>`.
 
         Args:
@@ -527,7 +541,7 @@ class SafeSreEnvironment(Environment):
             return self.system.files[path]
         return f"cat: {path}: No such file or directory"
 
-    def list_processes(self, filter: str = "") -> str:
+    def list_processes(self, filter: str = "", **_kwargs: Any) -> str:
         """Return a `ps aux`-style table of running processes.
 
         Args:
@@ -550,7 +564,7 @@ class SafeSreEnvironment(Environment):
             rows.append("(no matching processes)")
         return "\n".join(rows)
 
-    def check_service_status(self, service: str) -> str:
+    def check_service_status(self, service: str, **_kwargs: Any) -> str:
         """Return a `systemctl status <service>`-style summary."""
         svc = self.system.services.get(service)
         if svc is None:
@@ -563,7 +577,7 @@ class SafeSreEnvironment(Environment):
             f"   Active: {status} (exit={exit_code}, restarts={restarts})\n"
         )
 
-    def check_disk_usage(self, path: str = "/") -> str:
+    def check_disk_usage(self, path: str = "/", **_kwargs: Any) -> str:
         """Return a `df -h`-style summary for the given path (or all paths if `/`)."""
         if path == "/":
             entries = sorted(self.system.disk_usage.items())
@@ -576,7 +590,7 @@ class SafeSreEnvironment(Environment):
             rows.append("(no disk_usage data for this scenario)")
         return "\n".join(rows)
 
-    def list_ports(self) -> str:
+    def list_ports(self, **_kwargs: Any) -> str:
         """Return a `ss -tlnp`-style listing of port -> pid bindings."""
         if not self.system.ports:
             return "(no ports bound)"
@@ -589,7 +603,7 @@ class SafeSreEnvironment(Environment):
             rows.append(f"LISTEN  {port:<10}  {pid}  {cmd}")
         return "\n".join(rows)
 
-    def list_files(self, path: str = "/") -> str:
+    def list_files(self, path: str = "/", **_kwargs: Any) -> str:
         """Return an `ls -la`-style listing of files whose path starts with ``path``."""
         matches = sorted(p for p in self.system.files if p.startswith(path))
         if not matches:
