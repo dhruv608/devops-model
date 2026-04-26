@@ -37,19 +37,30 @@ except Exception as e:  # pragma: no cover
 
 try:
     from ..models import SafeSreAction, SafeSreObservation
+    from .dashboard_ui import build_safe_sre_ui
     from .safe_sre_env_environment import SafeSreEnvironment
 except ImportError:
     from models import SafeSreAction, SafeSreObservation
+    from server.dashboard_ui import build_safe_sre_ui
     from server.safe_sre_env_environment import SafeSreEnvironment
 
 
-# Create the app with web interface and README integration
+# Create the app with web interface and README integration.
+#
+# ``gradio_builder=build_safe_sre_ui`` adds a "Custom" tab to /web alongside
+# the default OpenEnv "Playground" tab — turning the App view into a
+# single-page judge experience: project context + pre-computed comparisons
+# + outbound link to the live comparison Space + architecture drill-down,
+# while keeping the Playground tab so reviewers can still hit the env's
+# tool form directly. Falls back gracefully to the bare playground if the
+# custom builder ever raises (OpenEnv's TypeError check).
 app = create_app(
     SafeSreEnvironment,
     SafeSreAction,
     SafeSreObservation,
     env_name="safe_sre_env",
     max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
+    gradio_builder=build_safe_sre_ui,
 )
 
 
