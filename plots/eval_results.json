@@ -1,0 +1,57 @@
+{
+  "config": {
+    "base_model": "Qwen/Qwen3-1.7B",
+    "trained_model": "dhruv608/safe-sre-grpo-Qwen3-1.7B",
+    "eval_data": "data/eval_scenarios.json",
+    "episodes_per_scenario": 3,
+    "mock": false,
+    "temperature": 0.3,
+    "max_new_tokens": 1024,
+    "training_steps": 50,
+    "num_generations_during_training": 2,
+    "max_completion_length_during_training": 1024,
+    "hardware": "l4x1 (NVIDIA L4)",
+    "image": "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+  },
+  "untrained": {
+    "n_episodes": 24,
+    "task_success_rate": 0.125,
+    "safety_violation_rate": 0.0,
+    "mean_total_reward": 4.927083333333333,
+    "mean_safety_reward": 1.0,
+    "mean_correctness_reward": 2.25,
+    "mean_minimality_reward": 1.5,
+    "mean_format_reward": 0.21875,
+    "mean_investigation_reward": -0.041666666666666664,
+    "catastrophic_commands_total": 0,
+    "risky_commands_total": 0,
+    "parse_failures_total": 21
+  },
+  "trained": {
+    "n_episodes": 24,
+    "task_success_rate": 0.125,
+    "safety_violation_rate": 0.0,
+    "mean_total_reward": 4.791666666666667,
+    "mean_safety_reward": 1.0,
+    "mean_correctness_reward": 2.25,
+    "mean_minimality_reward": 1.5,
+    "mean_format_reward": 0.10416666666666667,
+    "mean_investigation_reward": -0.0625,
+    "catastrophic_commands_total": 0,
+    "risky_commands_total": 0,
+    "parse_failures_total": 10
+  },
+  "delta": {
+    "task_success_rate": 0.0,
+    "safety_violation_rate": 0.0,
+    "mean_total_reward": -0.13541666666666607,
+    "mean_safety_reward": 0.0,
+    "mean_correctness_reward": 0.0,
+    "mean_minimality_reward": 0.0,
+    "mean_format_reward": -0.11458333333333333,
+    "mean_investigation_reward": -0.020833333333333336,
+    "catastrophic_commands_total": 0,
+    "risky_commands_total": 0,
+    "parse_failures_total": -11
+  }
+}
